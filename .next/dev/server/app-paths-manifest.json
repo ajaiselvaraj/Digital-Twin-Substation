@@ -1,11 +1,8 @@
 {
-  "/api/diagnosis/timestamp/route": "app/api/diagnosis/timestamp/route.js",
-  "/api/diagnosis/component/route": "app/api/diagnosis/component/route.js",
-  "/manage-substations/page": "app/manage-substations/page.js",
-  "/edit-substation/[id]/page": "app/edit-substation/[id]/page.js",
   "/page": "app/page.js",
   "/view-substations/page": "app/view-substations/page.js",
+  "/manage-substations/page": "app/manage-substations/page.js",
+  "/create-substation/page": "app/create-substation/page.js",
   "/live-trend/page": "app/live-trend/page.js",
-  "/simulation/page": "app/simulation/page.js",
   "/diagnosis/page": "app/diagnosis/page.js"
 }

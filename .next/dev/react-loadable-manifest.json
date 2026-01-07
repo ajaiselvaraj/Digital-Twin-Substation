@@ -55,32 +55,16 @@
     "id": "components\\dashboard\\interactive-map.tsx -> leaflet",
     "files": []
   },
-  "components\\simulation\\analysis-page.tsx -> @/lib/firebase-data": {
-    "id": "components\\simulation\\analysis-page.tsx -> @/lib/firebase-data",
-    "files": []
-  },
-  "components\\simulation\\analysis-page.tsx -> jspdf": {
-    "id": "components\\simulation\\analysis-page.tsx -> jspdf",
+  "components\\forms\\master-substation-form.tsx -> @/lib/firebase": {
+    "id": "components\\forms\\master-substation-form.tsx -> @/lib/firebase",
     "files": [
-      "static/chunks/_app-pages-browser_node_modules_jspdf_dist_jspdf_es_min_js.js"
+      "static/chunks/_app-pages-browser_lib_firebase_ts.js"
     ]
   },
-  "node_modules\\jspdf\\dist\\jspdf.es.min.js -> canvg": {
-    "id": "node_modules\\jspdf\\dist\\jspdf.es.min.js -> canvg",
+  "components\\forms\\master-substation-form.tsx -> firebase/firestore": {
+    "id": "components\\forms\\master-substation-form.tsx -> firebase/firestore",
     "files": [
-      "static/chunks/_app-pages-browser_node_modules_canvg_lib_index_es_js.js"
-    ]
-  },
-  "node_modules\\jspdf\\dist\\jspdf.es.min.js -> dompurify": {
-    "id": "node_modules\\jspdf\\dist\\jspdf.es.min.js -> dompurify",
-    "files": [
-      "static/chunks/_app-pages-browser_node_modules_dompurify_dist_purify_es_mjs.js"
-    ]
-  },
-  "node_modules\\jspdf\\dist\\jspdf.es.min.js -> html2canvas": {
-    "id": "node_modules\\jspdf\\dist\\jspdf.es.min.js -> html2canvas",
-    "files": [
-      "static/chunks/_app-pages-browser_node_modules_html2canvas_dist_html2canvas_js.js"
+      "static/chunks/_app-pages-browser_node_modules_firebase_firestore_dist_esm_index_esm_js.js"
     ]
   },
   "node_modules\\next\\dist\\client\\dev\\hot-reloader\\app\\web-socket.js -> @vercel/turbopack-ecmascript-runtime/browser/dev/hmr-client/hmr-client.ts": {

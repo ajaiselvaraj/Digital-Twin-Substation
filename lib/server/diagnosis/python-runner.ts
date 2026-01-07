@@ -48,7 +48,9 @@ const FAULT_LIBRARY: Record<DiagnosisComponentKey, Array<{ fault: string; subpar
   ],
 }
 
-const runCommand = (args: string[], stdinData?: string, timeoutMs: number = 60000) =>
+const DEFAULT_TIMEOUT_MS = Number(process.env.ML_PREDICT_TIMEOUT_MS || 15000)
+
+const runCommand = (args: string[], stdinData?: string, timeoutMs: number = DEFAULT_TIMEOUT_MS) =>
   new Promise<string>((resolve, reject) => {
     const cmd = process.env.PYTHON_PATH || "python"
     const subprocess = spawn(cmd, args, { 
@@ -198,8 +200,8 @@ export async function invokePredictor(opts: {
   try {
     console.log(`[invokePredictor] Calling Python script: ${scriptPath}`)
     const startTime = Date.now()
-    // Use 60 second timeout for ML processing (can be increased if needed)
-    const output = await runCommand(args, stdinData, 60000)
+    // Use shorter timeout to fail fast and rely on cached/mock results when Python is slow
+    const output = await runCommand(args, stdinData, DEFAULT_TIMEOUT_MS)
     const duration = Date.now() - startTime
     console.log(`[invokePredictor] Python script completed in ${duration}ms`)
     

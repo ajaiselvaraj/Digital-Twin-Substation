@@ -35,6 +35,7 @@ const severityTone: Record<string, { label: string; className: string }> = {
 // Client-side cache for diagnosis data to speed up component switching
 const diagnosisCache = new Map<string, { data: DiagnosisApiResponse; timestamp: number }>()
 const CACHE_TTL = 60000 // 60 seconds cache TTL
+const SCADA_CACHE_TTL = 10000 // 10 seconds to reuse last SCADA response when switching tabs
 
 function getCacheKey(areaCode: string, substationId: string, component: string): string {
   return `${areaCode}-${substationId}-${component}`
@@ -57,6 +58,7 @@ export default function DiagnosisPage() {
   const previousComponentRef = useRef<string | null>(null)
   const scadaDataRef = useRef(scadaData)
   const activeComponentRef = useRef(activeComponent)
+  const scadaComponentCacheRef = useRef<Map<string, { data: DiagnosisApiResponse; timestamp: number }>>(new Map())
 
   // Keep refs updated with latest values so polling function always has current values
   useEffect(() => {
@@ -101,7 +103,16 @@ export default function DiagnosisPage() {
       
       // Clear data when component changes or on initial load
       if (componentChanged || isInitialLoad) {
-        setData(null)
+        const cacheKey = getCacheKey("SCADA", "SCADA", activeComponent)
+        const cached = scadaComponentCacheRef.current.get(cacheKey)
+        if (cached && Date.now() - cached.timestamp < SCADA_CACHE_TTL) {
+          // Reuse very recent SCADA response so tab switch feels instant
+          setData(cached.data)
+          setIsLoading(false)
+        } else {
+          setData(null)
+          setIsLoading(true)
+        }
         setError(null)
       }
       
@@ -196,13 +207,20 @@ export default function DiagnosisPage() {
           // Call diagnosis API with SCADA data
           const controller = new AbortController()
           let timeoutId: NodeJS.Timeout | null = null
+          let isRequestCompleted = false
           
           // Set timeout with proper cleanup
           // Increased to 90 seconds to allow for ML model processing time
           timeoutId = setTimeout(() => {
-            if (timeoutId) {
+            // Only abort if request hasn't completed and controller is not already aborted
+            if (!isRequestCompleted && timeoutId && !controller.signal.aborted) {
               console.warn(`[DiagnosisPage] Request timeout after 90s, aborting...`)
-              controller.abort()
+              try {
+                controller.abort()
+              } catch (abortErr) {
+                // Ignore errors from abort itself (e.g., if already aborted)
+                // This prevents "signal is aborted without reason" errors
+              }
             }
           }, 90000) // 90 second timeout (increased for ML processing)
 
@@ -223,14 +241,18 @@ export default function DiagnosisPage() {
               console.log(`[DiagnosisPage] Sending legacy SCADA format for ${currentActiveComponent}, readings: ${Object.keys(scadaReadings).length} params`)
             }
 
-            const response = await fetch("/api/diagnosis/component", {
+            const apiUrl =
+              typeof window !== "undefined" ? `${window.location.origin}/api/diagnosis/component` : "/api/diagnosis/component"
+
+            const response = await fetch(apiUrl, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(requestBody),
               signal: controller.signal,
             })
 
-            // Clear timeout on successful response
+            // Mark request as completed and clear timeout on successful response
+            isRequestCompleted = true
             if (timeoutId) {
               clearTimeout(timeoutId)
               timeoutId = null
@@ -271,9 +293,12 @@ export default function DiagnosisPage() {
             setLastUpdated(new Date().toISOString())
             setIsLoading(false)
             setError(null) // Clear any previous errors
+            const scadaCacheKey = getCacheKey("SCADA", "SCADA", currentActiveComponent)
+            scadaComponentCacheRef.current.set(scadaCacheKey, { data: payload, timestamp: Date.now() })
             console.log(`[DiagnosisPage] State update called for ${currentActiveComponent} with payload keys:`, Object.keys(payload))
           } catch (fetchErr) {
-            // Clear timeout on error
+            // Mark request as completed and clear timeout on error
+            isRequestCompleted = true
             if (timeoutId) {
               clearTimeout(timeoutId)
               timeoutId = null
@@ -283,12 +308,19 @@ export default function DiagnosisPage() {
             throw fetchErr
           }
           } catch (err) {
+            // Handle AbortError gracefully (expected when timeout occurs)
+            if (err instanceof Error && err.name === "AbortError") {
+              // Don't log AbortError as an error - it's expected behavior for timeouts
+              setError("Request timeout - the diagnosis API took too long to respond (90s timeout). The ML model may be processing. Please try again.")
+              setIsLoading(false)
+              return
+            }
+            
+            // Log and handle other errors
             console.error("SCADA diagnosis fetch error:", err)
             if (err instanceof Error) {
-              if (err.name === "AbortError") {
-                setError("Request timeout - the diagnosis API took too long to respond (90s timeout). The ML model may be processing. Please try again.")
-              } else if (err.message.includes("Failed to fetch")) {
-                setError("Network error - cannot connect to diagnosis API. Check if the server is running.")
+              if (err.message.includes("Failed to fetch")) {
+                setError("Network error - cannot connect to diagnosis API. Check if the server is running and reachable.")
               } else {
                 setError(`Unable to fetch diagnosis data: ${err.message}`)
               }
@@ -482,7 +514,7 @@ export default function DiagnosisPage() {
       clearInterval(interval)
       isInitialFetch.current = true // Reset for next query
     }
-  }, [query?.areaCode, query?.substationId, activeComponent, refreshToken, dataSource, scadaData.isLoading, scadaData.error])
+  }, [query?.areaCode, query?.substationId, activeComponent, refreshToken, dataSource])
 
   // Debug: Log when data changes
   useEffect(() => {
@@ -664,7 +696,8 @@ export default function DiagnosisPage() {
     let adjustedTimeline: number[] | undefined = data.timeline_prediction
     if (data.timeline_prediction && data.timeline_prediction.length > 0 && data.LSTM_ForecastScore !== undefined) {
       // Use the adjusted LSTM score (already reduced by 8%)
-      const lstmPercent = adjustedLSTMScore // Decimal (e.g., 0.20 for 20%, -0.128 for -12.8%)
+      // adjustedLSTMScore is guaranteed to be a number here because we checked LSTM_ForecastScore !== undefined
+      const lstmPercent = adjustedLSTMScore ?? 0 // Decimal (e.g., 0.20 for 20%, -0.128 for -12.8%)
       
       // Get current value from liveReadings based on component type
       let currentValue: number | null = null
@@ -741,6 +774,140 @@ export default function DiagnosisPage() {
     pendingIssues: adjustedData?.maintenance?.pendingIssues ?? [],
     suggestions: adjustedData?.maintenance?.suggestions ?? [],
   }
+
+  const mlTrendAnalysis = useMemo(() => {
+    if (!adjustedData) return null
+    const faultProb = adjustedData.fault_probability ?? 0
+    const healthPct = adjustedData.health_index ?? 0
+    const health = Math.max(0, Math.min(1, healthPct / 100))
+    const hiCrit = 0.2
+
+    // Derive daily decline: base on fault probability and LSTM trend
+    const lstm = adjustedData.LSTM_ForecastScore ?? 0
+    const baseDecline = faultProb * 0.02 // faster drop when probability is high
+    const trendDecline = lstm > 0 ? lstm * 0.01 : Math.abs(lstm) * 0.004
+    const deltaHiDay = Math.max(0.0005, baseDecline + trendDecline) // clamp to avoid div/0
+
+    const declineFor = (days: number, multiplier = 1) =>
+      Math.max(0, Math.min(1, health - deltaHiDay * multiplier * days))
+
+    const rulCalc = (mult: number) => {
+      if (health <= hiCrit) return 0
+      const denom = deltaHiDay * mult
+      if (denom <= 0) return Infinity
+      return Math.max(0, (health - hiCrit) / denom)
+    }
+
+    const rulOptDays = rulCalc(0.8)
+    const rulExpDays = rulCalc(1.0)
+    const rulConDays = rulCalc(1.2)
+
+    const componentName = adjustedData.affected_subpart || COMPONENT_DEFINITIONS[activeComponent]?.title || "Component"
+
+    return {
+      riskScore: Math.round(faultProb * 100),
+      trendDirection: lstm > 0.05 ? "Rising risk" : lstm < -0.05 ? "Improving" : "Stable",
+      trendDetail:
+        lstm > 0.05
+          ? "Model forecasts increasing risk over the next window."
+          : lstm < -0.05
+            ? "Model forecasts decreasing risk; monitor for confirmation."
+            : "Risk is largely flat; watch for new anomalies.",
+      componentName,
+      predictedFault: adjustedData.predicted_fault ?? "Normal",
+      rul: {
+        optimisticDays: Math.round(rulOptDays),
+        expectedDays: Math.round(rulExpDays),
+        conservativeDays: Math.round(rulConDays),
+      },
+      projections: {
+        h30: Math.round(declineFor(30) * 100),
+        h90: Math.round(declineFor(90) * 100),
+        h180: Math.round(declineFor(180) * 100),
+      },
+    }
+  }, [adjustedData, activeComponent])
+
+  // Fire-and-forget email notification when a fault is predicted.
+  // If multiple faults exist, they are combined into one message and throttled to 1/hr per area+component.
+  const lastFaultMailRef = useRef<Record<string, number>>({})
+  const faultEmailRecipient = "oceanberg25@gmail.com"
+
+  useEffect(() => {
+    if (!adjustedData) return
+    if (typeof window === "undefined") return
+
+    const predicted = (adjustedData.predicted_fault ?? "Normal").trim()
+    const alerts = adjustedData.maintenance?.automaticAlerts?.filter((alert) => alert.severity !== "normal") ?? []
+
+    const hasPredictedFault = predicted.toLowerCase() !== "normal"
+    const faultMessages: string[] = []
+
+    const probabilityPct = Math.round((adjustedData.fault_probability ?? 0) * 100)
+    const componentName = adjustedData.affected_subpart || COMPONENT_DEFINITIONS[activeComponent]?.title || activeComponent
+    const mitigation =
+      adjustedData.maintenance?.suggestions?.[0] ??
+      "Review diagnostics, dispatch crew, and follow standard operating procedure."
+
+    if (hasPredictedFault) {
+      faultMessages.push(`Predicted fault: ${predicted} (component: ${componentName}, probability: ${probabilityPct}%).`)
+    }
+
+    alerts.forEach((alert) => {
+      faultMessages.push(`${alert.title} [${alert.severity}] - ${alert.description}`)
+    })
+
+    if (faultMessages.length === 0) return
+
+    const throttleKey = `${query?.areaCode ?? "GLOBAL"}-${query?.substationId ?? "SCADA"}-${activeComponent}`
+    const storageKey = `fault-mail-${throttleKey}`
+
+    const storedTs = window.localStorage.getItem(storageKey)
+    if (storedTs) {
+      lastFaultMailRef.current[throttleKey] = Number(storedTs)
+    }
+
+    const lastSent = lastFaultMailRef.current[throttleKey] ?? 0
+    const now = Date.now()
+    const TEN_MIN_MS = 10 * 60 * 1000
+
+    if (now - lastSent < TEN_MIN_MS) return
+
+    const combinedNotes = [
+      `Equipment: ${componentName}`,
+      `Mitigation: ${mitigation}`,
+      "Detected Faults:",
+      ...faultMessages.map((msg, idx) => `${idx + 1}. ${msg}`),
+    ].join("\n")
+
+    fetch("/api/diagnosis/maintenance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "notify",
+        areaCode: query?.areaCode ?? "N/A",
+        substationId: query?.substationId ?? "N/A",
+        component: activeComponent,
+        email: faultEmailRecipient,
+        faults: faultMessages,
+        mitigation,
+        notes: combinedNotes,
+        attachments: [],
+      }),
+    })
+      .then((res) => {
+        console.log("[Diagnosis] fault mail POST response", res.status)
+        lastFaultMailRef.current[throttleKey] = now
+        window.localStorage.setItem(storageKey, String(now))
+      })
+      .catch((err) => console.warn("Fault email notify failed", err))
+  }, [adjustedData, activeComponent, query?.areaCode, query?.substationId])
+
+  const predictedFaultLabel = adjustedData?.predicted_fault ?? "Normal"
+  const isPredictedNormal = predictedFaultLabel.toLowerCase() === "normal"
+  const faultProbabilityPct = Math.round((adjustedData?.fault_probability ?? 0) * 100)
+  // Mirror maintenance workflow suggestions in the top-level maintenance actions card
+  const maintenanceTasks = maintenanceSnapshot.suggestions
 
   const formatCoordinate = (value: number | string | null | undefined) => {
     if (typeof value === "number") {
@@ -867,64 +1034,168 @@ export default function DiagnosisPage() {
                 </div>
               </div>
 
-              <div className="grid gap-4 lg:grid-cols-3">
-                <div className="rounded-2xl bg-slate-50 p-4">
-                  <p className="text-xs uppercase tracking-wide text-slate-500">Fault Probability</p>
-                  <p className={cn("text-3xl font-bold", getFaultProbabilityTextClass(Math.round((adjustedData.fault_probability ?? 0) * 100)))}>
-                    {Math.round((adjustedData.fault_probability ?? 0) * 100)}%
-                  </p>
+              {/* Original Main Grid Layout */}
+              <div className="grid gap-4 lg:grid-cols-12">
+                {/* Fault Probability + Health Index */}
+                <div className="lg:col-span-3 space-y-3">
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">Fault Probability</p>
+                    <p className={cn("text-3xl font-bold", getFaultProbabilityTextClass(faultProbabilityPct))}>
+                      {faultProbabilityPct}%
+                    </p>
+                  </div>
+
+                  <div className="rounded-2xl border bg-white p-4">
+                    <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">Health Index</p>
+                    <p className="text-3xl font-bold text-emerald-700">{Math.round(adjustedData.health_index)}%</p>
+                  </div>
                 </div>
-                <div className="rounded-2xl bg-slate-50 p-4">
-                  <p className="text-xs uppercase tracking-wide text-slate-500">Predicted Fault</p>
-                  <p className="text-lg font-semibold text-slate-900">{adjustedData.predicted_fault ?? "Normal"}</p>
-                  <p className="text-xs text-slate-500">{adjustedData.affected_subpart}</p>
-                </div>
-                <div className="rounded-2xl bg-slate-50 p-4">
-                  <p className="text-xs uppercase tracking-wide text-slate-500">Last Sync</p>
-                  <p className="text-lg font-semibold text-slate-900">
-                    {lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : "—"}
-                  </p>
+
+                {/* Predicted Fault - Large Section */}
+                <div className="lg:col-span-9 rounded-2xl border bg-white p-4">
+                    <p className="text-xs uppercase tracking-wide text-slate-500 mb-4">Predicted Fault</p>
+                  <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2">
+                    {/* Main Predicted Fault Card */}
+                    <div className="rounded-lg border-2 border-slate-200 bg-white p-4 min-h-[220px] max-h-[260px] overflow-y-auto">
+                      <div className="flex items-start justify-between mb-3">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">ML-Based Fault Diagnosis</p>
+                          <h3 className="text-lg font-semibold text-slate-900">{predictedFaultLabel}</h3>
+                          <p className="text-xs text-slate-600">Likely component: {mlTrendAnalysis?.componentName ?? "—"}</p>
+                        </div>
+                        <Badge className={severityTone[adjustedData.live_status]?.className ?? "bg-slate-100 text-slate-600"}>
+                          {severityTone[adjustedData.live_status]?.label ?? "Normal"}
+                        </Badge>
+                      </div>
+                      
+                      {!isPredictedNormal && adjustedData.affected_subpart && (
+                        <div className="mb-3">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Equipment Involved</p>
+                          <p className="text-sm text-slate-700">{adjustedData.affected_subpart}</p>
+                        </div>
+                      )}
+                      
+                      {!isPredictedNormal && adjustedData.maintenance?.suggestions?.length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Recommended Action</p>
+                          <ul className="list-disc list-inside space-y-1">
+                            {adjustedData.maintenance.suggestions.slice(0, 3).map((suggestion, idx) => (
+                              <li key={idx} className="text-sm text-slate-700">{suggestion}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Additional Faults from Maintenance Alerts */}
+                    {adjustedData.maintenance?.automaticAlerts
+                      ?.filter((alert) => alert.severity !== "normal")
+                      .map((alert) => (
+                        <div key={alert.id} className="rounded-lg border-2 border-black bg-white p-4">
+                          <div className="flex items-start justify-between mb-3">
+                            <h3 className="text-lg font-semibold text-slate-900">{alert.title}</h3>
+                            <Badge className={severityTone[alert.severity]?.className ?? "bg-slate-100 text-slate-600"}>
+                              {severityTone[alert.severity]?.label ?? "Normal"}
+                            </Badge>
+                          </div>
+                          
+                          <div className="mb-3">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Description</p>
+                            <p className="text-sm text-slate-700">{alert.description}</p>
+                          </div>
+                          
+                          {alert.owner && (
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Owner</p>
+                              <p className="text-sm text-slate-700">{alert.owner}</p>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+
+                    {/* Additional Faults from Pending Issues */}
+                    {adjustedData.maintenance?.pendingIssues
+                      ?.filter((issue) => issue.severity !== "normal")
+                      .map((issue) => (
+                        <div key={issue.id} className="rounded-lg border-2 border-orange-200 bg-white p-4">
+                          <div className="flex items-start justify-between mb-3">
+                            <h3 className="text-lg font-semibold text-slate-900">{issue.title}</h3>
+                            <Badge className={severityTone[issue.severity]?.className ?? "bg-slate-100 text-slate-600"}>
+                              {severityTone[issue.severity]?.label ?? "Normal"}
+                            </Badge>
+                          </div>
+                          
+                          <div className="mb-3">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Description</p>
+                            <p className="text-sm text-slate-700">{issue.description}</p>
+                          </div>
+                          
+                          {issue.owner && (
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Owner</p>
+                              <p className="text-sm text-slate-700">{issue.owner}</p>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                  </div>
                 </div>
               </div>
 
-              <div className="grid gap-4 lg:grid-cols-2">
-                <div className="rounded-2xl border bg-white/70 p-4">
-                  <p className="text-xs uppercase tracking-wide text-slate-500">Latest Events</p>
-                  {adjustedData.events?.length ? (
-                    <div className="mt-3 space-y-2">
-                      {adjustedData.events.slice(0, 2).map((event) => (
-                        <div key={event.id} className="rounded-lg bg-slate-50 px-3 py-2 text-sm">
-                          <p className="font-semibold text-slate-900">{event.title}</p>
-                          <p className="text-xs text-slate-500">{event.description}</p>
-                          <p className="text-[11px] uppercase text-slate-400">{event.timestamp}</p>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="mt-2 text-sm text-slate-500">No recent events logged.</p>
-                  )}
-                </div>
-                <div className="rounded-2xl border bg-white/70 p-4">
-                  <p className="text-xs uppercase tracking-wide text-slate-500">Maintenance Alerts</p>
-                  {adjustedData.maintenance?.pendingIssues?.length ? (
-                    <div className="mt-3 space-y-2">
-                      {adjustedData.maintenance.pendingIssues.slice(0, 2).map((issue) => (
-                        <div key={issue.id} className="rounded-lg bg-amber-50 px-3 py-2 text-sm">
-                          <p className="font-semibold text-slate-900">{issue.title}</p>
-                          <p className="text-xs text-slate-500">{issue.description}</p>
-                          <p className="text-[11px] uppercase text-amber-600">{issue.severity}</p>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="mt-2 text-sm text-slate-500">No pending maintenance tickets.</p>
-                  )}
-                </div>
-              </div>
             </CardContent>
           </Card>
 
           <div className="space-y-6">
+            {mlTrendAnalysis && (
+              <Card className="border border-slate-200">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-lg">ML-Based Trend & RUL</CardTitle>
+                  <p className="text-xs text-slate-500">
+                    Model-guided projection of risk, component impact, and remaining useful life.
+                  </p>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="rounded-lg border border-slate-100 bg-emerald-50 p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-slate-500">RUL (Optimistic)</p>
+                      <p className="text-xl font-bold text-emerald-700">{mlTrendAnalysis.rul.optimisticDays} days</p>
+                      <p className="text-[11px] text-emerald-700/80">
+                        {(mlTrendAnalysis.rul.optimisticDays / 30).toFixed(1)} months @ slow decline
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-slate-100 bg-white p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-slate-500">RUL (Expected)</p>
+                      <p className="text-xl font-bold text-amber-700">{mlTrendAnalysis.rul.expectedDays} days</p>
+                      <p className="text-[11px] text-amber-700/80">
+                        {(mlTrendAnalysis.rul.expectedDays / 30).toFixed(1)} months @ baseline decline
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-slate-100 bg-rose-50 p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-slate-500">RUL (Conservative)</p>
+                      <p className="text-xl font-bold text-rose-700">{mlTrendAnalysis.rul.conservativeDays} days</p>
+                      <p className="text-[11px] text-rose-700/80">
+                        {(mlTrendAnalysis.rul.conservativeDays / 30).toFixed(1)} months @ faster decline
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-4 grid gap-3 md:grid-cols-3">
+                    <div className="rounded-lg border border-slate-100 bg-white p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-slate-500">30-day Health</p>
+                      <p className="text-lg font-semibold text-slate-900">{mlTrendAnalysis.projections.h30}%</p>
+                    </div>
+                    <div className="rounded-lg border border-slate-100 bg-white p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-slate-500">90-day Health</p>
+                      <p className="text-lg font-semibold text-slate-900">{mlTrendAnalysis.projections.h90}%</p>
+                    </div>
+                    <div className="rounded-lg border border-slate-100 bg-white p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-slate-500">180-day Health</p>
+                      <p className="text-lg font-semibold text-slate-900">{mlTrendAnalysis.projections.h180}%</p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             <div className="grid gap-6 xl:grid-cols-[2fr_1fr]">
               <LivePanel
                 component={activeComponent}
