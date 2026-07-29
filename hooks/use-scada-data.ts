@@ -26,6 +26,7 @@ export function useScadaData(): UseScadaDataResult {
   const [lastUpdate, setLastUpdate] = useState<string | null>(null)
   const intervalRef = useRef<NodeJS.Timeout | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
+  const lastLoggedErrorRef = useRef<string | null>(null)
 
   useEffect(() => {
     // Only fetch if SCADA mode is active
@@ -34,6 +35,7 @@ export function useScadaData(): UseScadaDataResult {
       setRawData(null)
       setError(null)
       setIsLoading(false)
+      lastLoggedErrorRef.current = null // Reset error logging when switching away from SCADA
       return
     }
 
@@ -46,24 +48,49 @@ export function useScadaData(): UseScadaDataResult {
       abortControllerRef.current = new AbortController()
 
       try {
-        setIsLoading(true)
+        // Only show loading on initial fetch, not on polling updates (to avoid flickering)
+        if (!data && !rawData) {
+          setIsLoading(true)
+        }
         setError(null)
 
-        const scadaData = await fetchScadaData(scadaUrl)
+        // Use longer timeout for SCADA server (10 seconds)
+        const scadaData = await fetchScadaData(scadaUrl, 10000)
         const mappedData = mapScadaToFrontendFormat(scadaData)
 
         setData(mappedData)
         setRawData(scadaData) // Preserve raw data with asset metadata
         setLastUpdate(new Date().toISOString())
+        setError(null) // Clear any previous errors on success
+        lastLoggedErrorRef.current = null // Reset error logging on success
       } catch (err) {
+        // Ignore abort errors (request was cancelled intentionally)
         if (err instanceof Error && err.name === "AbortError") {
-          // Request was cancelled, ignore
           return
         }
+        
+        // Handle timeout and network errors gracefully
         const errorMessage = err instanceof Error ? err.message : "Failed to fetch SCADA data"
-        setError(errorMessage)
-        console.error("SCADA fetch error:", err)
-        // Keep last data on error (don't clear it)
+        
+        // Only update error state, don't log to console for expected errors (timeout, network)
+        // This prevents console spam when server is offline
+        if (err instanceof Error && (err.name === "TimeoutError" || err.name === "NetworkError")) {
+          setError(errorMessage)
+          // Log only once per error type to avoid console spam
+          if (lastLoggedErrorRef.current !== errorMessage) {
+            console.warn(`[SCADA] ${err.name}: ${errorMessage}`)
+            lastLoggedErrorRef.current = errorMessage
+          }
+        } else {
+          // Log unexpected errors (but only once per unique error)
+          setError(errorMessage)
+          if (lastLoggedErrorRef.current !== errorMessage) {
+            console.error("SCADA fetch error:", err)
+            lastLoggedErrorRef.current = errorMessage
+          }
+        }
+        
+        // Keep last data on error (don't clear it) - allows UI to continue showing last known state
       } finally {
         setIsLoading(false)
       }

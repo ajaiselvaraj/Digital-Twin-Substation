@@ -1,5 +1,7 @@
 "use client"
 
+import { useTransition } from "react"
+
 import { Button } from "@/components/ui/button"
 import { useDiagnosisNav } from "./diagnosis-context"
 import { PRIMARY_COMPONENTS, COMPONENT_DEFINITIONS } from "@/lib/diagnosis/component-config"
@@ -7,6 +9,7 @@ import { PRIMARY_COMPONENTS, COMPONENT_DEFINITIONS } from "@/lib/diagnosis/compo
 
 export function DiagnosisTopNav() {
   const { activeComponent, setActiveComponent } = useDiagnosisNav()
+  const [isPending, startTransition] = useTransition()
   const palette = {
     bayLines: "bg-blue-600 hover:bg-blue-700 text-white",
     transformer: "bg-emerald-600 hover:bg-emerald-700 text-white",
@@ -37,10 +40,14 @@ export function DiagnosisTopNav() {
                 key={key}
                 size="sm"
                 variant="default"
-                className={`w-28 shadow ${palette[key]} ${
+                className={`w-28 shadow transition-all ${palette[key]} ${
                   activeComponent === key ? "ring-2 ring-offset-2 ring-white" : ""
-                }`}
-                onClick={() => setActiveComponent(key)}
+                } ${isPending ? "opacity-90" : ""}`}
+                onClick={() =>
+                  startTransition(() => {
+                    setActiveComponent(key)
+                  })
+                }
               >
                 {COMPONENT_DEFINITIONS[key].title}
               </Button>

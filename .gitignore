@@ -1,3 +1,4 @@
 backend/ml/model_files/
 public/model/
 node_modules/
+.next/

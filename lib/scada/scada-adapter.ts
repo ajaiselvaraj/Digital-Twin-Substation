@@ -233,10 +233,14 @@ export function mapScadaToFrontendFormat(scadaData: ScadaData): MappedFrontendDa
 
 /**
  * Fetches SCADA data from the Flask server
+ * @param url SCADA server URL
+ * @param timeoutMs Timeout in milliseconds (default: 10000ms / 10 seconds)
  */
-export async function fetchScadaData(url: string): Promise<ScadaData> {
+export async function fetchScadaData(url: string, timeoutMs: number = 10000): Promise<ScadaData> {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 5000) // 5 second timeout
+  const timeoutId = setTimeout(() => {
+    controller.abort()
+  }, timeoutMs)
 
   try {
     const response = await fetch(url, {
@@ -257,12 +261,22 @@ export async function fetchScadaData(url: string): Promise<ScadaData> {
     return data as ScadaData
   } catch (error) {
     clearTimeout(timeoutId)
+    
+    // Handle abort errors (timeout) gracefully
     if (error instanceof Error && error.name === "AbortError") {
-      throw new Error("SCADA server timeout - server may be offline")
+      const timeoutError = new Error("SCADA server timeout - server may be offline")
+      timeoutError.name = "TimeoutError"
+      throw timeoutError
     }
-    if (error instanceof Error && error.message.includes("Failed to fetch")) {
-      throw new Error("Cannot connect to SCADA server - check network connection")
+    
+    // Handle network errors
+    if (error instanceof Error && (error.message.includes("Failed to fetch") || error.message.includes("NetworkError"))) {
+      const networkError = new Error("Cannot connect to SCADA server - check network connection")
+      networkError.name = "NetworkError"
+      throw networkError
     }
+    
+    // Re-throw other errors as-is
     throw error
   }
 }
