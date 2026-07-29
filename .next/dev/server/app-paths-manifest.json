@@ -1,8 +1,0 @@
-{
-  "/page": "app/page.js",
-  "/view-substations/page": "app/view-substations/page.js",
-  "/manage-substations/page": "app/manage-substations/page.js",
-  "/create-substation/page": "app/create-substation/page.js",
-  "/live-trend/page": "app/live-trend/page.js",
-  "/diagnosis/page": "app/diagnosis/page.js"
-}
