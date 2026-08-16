@@ -1,4 +1,32 @@
-backend/ml/model_files/
-public/model/
+# Dependencies
 node_modules/
+.pnp
+.pnp.js
+
+# Next.js
 .next/
+out/
+
+# Production
+dist/
+build/
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Testing
+coverage/
+.nyc_output/
+
+# Misc
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# Model files (keep these tracked)
+backend/ml/model_files/
