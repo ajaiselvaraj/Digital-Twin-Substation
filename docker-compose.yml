@@ -1,0 +1,65 @@
+version: "3.8"
+
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: digital-twin-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - digital-twin-network
+
+  ml-service:
+    build:
+      context: ./ml
+      dockerfile: Dockerfile
+    container_name: digital-twin-ml
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+    networks:
+      - digital-twin-network
+    restart: always
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: digital-twin-backend
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - MONGODB_URI=mongodb://mongodb:27017/oceanberg-digital-twin
+      - ML_SERVICE_URL=http://ml-service:8000
+    depends_on:
+      - mongodb
+      - ml-service
+    networks:
+      - digital-twin-network
+    restart: always
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: digital-twin-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_BACKEND_URL=http://backend:5000
+    depends_on:
+      - backend
+    networks:
+      - digital-twin-network
+    restart: always
+
+volumes:
+  mongodb_data:
+
+networks:
+  digital-twin-network:
+    driver: bridge

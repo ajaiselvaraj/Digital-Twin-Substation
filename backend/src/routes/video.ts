@@ -394,8 +394,8 @@ router.post("/simulation-video", rawBodyParser, async (req: Request, res: Respon
   }
 })
 
-// 6. DELETE /api/simulation-video
-router.delete("/api/simulation-video", async (req: Request, res: Response) => {
+// 6. DELETE /simulation-video
+router.delete("/simulation-video", async (req: Request, res: Response) => {
   try {
     const simulationId = req.query.simulationId as string
 

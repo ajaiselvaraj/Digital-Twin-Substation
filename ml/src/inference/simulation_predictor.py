@@ -290,51 +290,84 @@ def predict_component_from_panel(
         raise ValueError(f"Unsupported component for simulation predictor: {component}")
 
     model_name = COMPONENT_MODEL_NAME[component]
-    artifacts = load_artifacts(model_name)
-
-    # Try to enrich with live asset metadata when Firebase is configured.
-    # If credentials / env vars are missing, fall back gracefully to
-    # using only the panel inputs so that the HTTP API does not fail.
+    
     try:
-        asset_metadata = fetch_asset_metadata(substation_id)
+        artifacts = load_artifacts(model_name)
+
+        # Try to enrich with live asset metadata when Firebase is configured.
+        # If credentials / env vars are missing, fall back gracefully to
+        # using only the panel inputs so that the HTTP API does not fail.
+        try:
+            asset_metadata = fetch_asset_metadata(substation_id)
+        except Exception as exc:
+            # This is safe to log to stderr – the Node.js caller surfaces the
+            # message if needed, but we still return a valid prediction payload.
+            print(
+                json.dumps(
+                    {
+                        "warning": "fetch_asset_metadata_failed",
+                        "substation_id": substation_id,
+                        "error": str(exc),
+                    }
+                ),
+                flush=True,
+            )
+            asset_metadata = {}
+
+        feature_row = _build_feature_row(component, artifacts, asset_metadata, panel_inputs)
+        X_scaled = _preprocess_row(feature_row, artifacts)
+
+        # Tabular meta-model prediction
+        meta_pred = artifacts.xgb_model.predict(X_scaled)
+
+        # Sequence for LSTM
+        X_seq, meta_seq = _build_sequence(X_scaled, meta_pred, artifacts)
+
+        # Final LSTM hybrid prediction
+        raw_pred = artifacts.lstm_model.predict([X_seq, meta_seq])[0]
+
+        result: Dict[str, Any] = {
+            artifacts.target_cols[i]: float(raw_pred[i]) for i in range(len(artifacts.target_cols))
+        }
+
+        # Normalize / mirror trueHealth vs overallHealth if present
+        if "trueHealth" in result and "overallHealth" not in result:
+            result["overallHealth"] = float(result["trueHealth"])
+        if "overallHealth" in result and "trueHealth" not in result:
+            result["trueHealth"] = float(result["overallHealth"])
+
+        return result
     except Exception as exc:
-        # This is safe to log to stderr – the Node.js caller surfaces the
-        # message if needed, but we still return a valid prediction payload.
-        print(
-            json.dumps(
-                {
-                    "warning": "fetch_asset_metadata_failed",
-                    "substation_id": substation_id,
-                    "error": str(exc),
-                }
-            ),
-            flush=True,
+        import logging
+        logging.getLogger("ml-service").warning(
+            f"Simulation predictor failed for {component}: {exc}. "
+            "Falling back to heuristic simulation prediction."
         )
-        asset_metadata = {}
-
-    feature_row = _build_feature_row(component, artifacts, asset_metadata, panel_inputs)
-    X_scaled = _preprocess_row(feature_row, artifacts)
-
-    # Tabular meta-model prediction
-    meta_pred = artifacts.xgb_model.predict(X_scaled)
-
-    # Sequence for LSTM
-    X_seq, meta_seq = _build_sequence(X_scaled, meta_pred, artifacts)
-
-    # Final LSTM hybrid prediction
-    raw_pred = artifacts.lstm_model.predict([X_seq, meta_seq])[0]
-
-    result: Dict[str, Any] = {
-        artifacts.target_cols[i]: float(raw_pred[i]) for i in range(len(artifacts.target_cols))
-    }
-
-    # Normalize / mirror trueHealth vs overallHealth if present
-    if "trueHealth" in result and "overallHealth" not in result:
-        result["overallHealth"] = float(result["trueHealth"])
-    if "overallHealth" in result and "trueHealth" not in result:
-        result["trueHealth"] = float(result["overallHealth"])
-
-    return result
+        
+        # Calculate a realistic mock health based on panel inputs if possible
+        # e.g. if temperature is high or loading is high, health goes down.
+        ambient_temp = float(panel_inputs.get("ambientTemperature", panel_inputs.get("ambientTemp", 30.0)))
+        loading = float(panel_inputs.get("transformerLoading", panel_inputs.get("loadingPercent", panel_inputs.get("loading", 70.0))))
+        
+        # Simple heuristic calculations for a realistic simulation result
+        stress = min(100.0, max(0.0, (ambient_temp - 20) * 1.5 + (loading - 50) * 0.8))
+        health = max(0.0, min(100.0, 100.0 - stress * 0.7))
+        fault_prob = max(0.0, min(1.0, stress / 100.0))
+        
+        return {
+            "trueHealth": round(health / 100.0, 3), # 0-1 range
+            "overallHealth": round(health, 2), # 0-100 range
+            "faultProbability": round(fault_prob, 3),
+            "stressScore": round(stress, 2),
+            "thermalHealth": round(max(0, health - 2), 2),
+            "oilHealth": round(max(0, health - 5), 2),
+            "insulationHealth": round(max(0, health - 3), 2),
+            "contactHealth": round(max(0, health - 1), 2),
+            "rul_realistic_months": round(max(0.0, 120.0 - stress * 0.8), 1),
+            "rul_optimistic_months": round(max(0.0, 180.0 - stress * 0.9), 1),
+            "rul_pessimistic_months": round(max(0.0, 60.0 - stress * 0.6), 1),
+            "fallback": True
+        }
 
 
 def _cli() -> int:  # pragma: no cover - simple convenience wrapper

@@ -8,6 +8,9 @@ const nextConfig = {
   },
   // Fix source map issues - disable production source maps
   productionBrowserSourceMaps: false,
+  experimental: {
+    optimizePackageImports: ['lucide-react', 'recharts', 'three', 'leaflet', 'react-leaflet'],
+  },
   // Webpack configuration to disable source maps in development
   // This will be used when running with --webpack flag
   webpack: (config, { dev, isServer }) => {
